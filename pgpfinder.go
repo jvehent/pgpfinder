@@ -9,25 +9,45 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
+var verbose = false
+
 func main() {
+	var err error
+	var keys []io.ReadCloser
+	found := 0
 	var keyserver = flag.String("ks", "http://gpg.mozilla.org:80", "Key server. Default uses Mozilla's.")
 	var search = flag.String("search", "someuser@example.net", "Search string. May return multiple results.")
 	var id = flag.String("id", "0xA3D652173B763E8F", "Key ID to retrieve. Returns only one result.")
+	var isverbose = flag.Bool("v", false, "Verbose mode")
 	flag.Parse()
-	var err error
-	var keys []io.ReadCloser
+	if *isverbose {
+		verbose = true
+	}
 	if *search != "someuser@example.net" {
-		keys, err = SearchAndReturn(*search, *keyserver)
+		keys, found, err = SearchAndReturn(*search, *keyserver)
+		fmt.Println("found", found, "keys on", *keyserver, "for", *search)
+		if found < 1 {
+			os.Exit(1)
+		}
 		if err != nil {
 			panic(err)
 		}
 	} else {
-		key, err := GetKeyByID(*id, *keyserver)
+		key, found, err := GetKeyByID(*id, *keyserver)
+		if found == 0 {
+			fmt.Println("No key found")
+			os.Exit(1)
+		}
+		if found > 1 {
+			fmt.Println("Found", found, "keys, and that's unexpected.")
+			os.Exit(1)
+		}
 		if err != nil {
 			panic(err)
 		}
@@ -46,7 +66,7 @@ func main() {
 		}
 		for _, el := range els {
 			keyid := strconv.FormatUint(el.PrimaryKey.KeyId, 16)
-			fmt.Printf("\n------- Details of Key ID %s\n", strings.ToUpper(keyid))
+			fmt.Printf("\n========       Details of Key ID %s       ========\n", strings.ToUpper(keyid))
 
 			fingerprint := hex.EncodeToString(el.PrimaryKey.Fingerprint[:])
 			fmt.Println("Fingerprint:", strings.ToUpper(fingerprint))
@@ -82,7 +102,7 @@ func main() {
 			}
 		}
 		key.Close()
-		fmt.Printf("\n-------------------------------\n")
+		fmt.Printf("\n================================================================\n")
 	}
 }
 
@@ -91,9 +111,11 @@ func parseRSAPubKey(pubkey *rsa.PublicKey) (err error) {
 	return
 }
 
-func SearchAndReturn(search, keyserver string) (keys []io.ReadCloser, err error) {
+func SearchAndReturn(search, keyserver string) (keys []io.ReadCloser, found int, err error) {
 	reqstr := fmt.Sprintf("%s/pks/lookup?op=vindex&options=mr&search=%s", keyserver, search)
-	fmt.Println("searching at", reqstr)
+	if verbose {
+		fmt.Println("searching at", reqstr)
+	}
 	resp, err := http.Get(reqstr)
 	if err != nil {
 		return
@@ -103,10 +125,11 @@ func SearchAndReturn(search, keyserver string) (keys []io.ReadCloser, err error)
 	pubre := regexp.MustCompile(`^pub:[0-9ABCDEF]{8}`)
 	for scanner.Scan() {
 		if pubre.MatchString(scanner.Text()) {
-			keyid := strings.Split(scanner.Text(), ":")[1]
+			found++
+			keyid := fmt.Sprintf("0x%s", strings.Split(scanner.Text(), ":")[1])
 			// we have a key id, now go fetch it
 			var key io.ReadCloser
-			key, err = GetKeyByID(keyid, keyserver)
+			key, _, err = GetKeyByID(keyid, keyserver)
 			if err != nil {
 				return
 			}
@@ -116,12 +139,23 @@ func SearchAndReturn(search, keyserver string) (keys []io.ReadCloser, err error)
 	return
 }
 
-func GetKeyByID(keyid, keyserver string)(key io.ReadCloser, err error){
-	reqstr := fmt.Sprintf("%s/pks/lookup?op=get&options=mr&search=0x%s", keyserver, keyid)
+func GetKeyByID(keyid, keyserver string) (key io.ReadCloser, found int, err error) {
+	re := regexp.MustCompile(`^0x[ABCDEF0-9]{8,64}$`)
+	if !re.MatchString(keyid) {
+		return key, 0, fmt.Errorf("Invalid key id. Must be in format '0x[ABCDEF0-9]{8,64}")
+	}
+	reqstr := fmt.Sprintf("%s/pks/lookup?op=get&options=mr&search=%s", keyserver, keyid)
+	if verbose {
+		fmt.Println("querying", reqstr)
+	}
 	resp, err := http.Get(reqstr)
 	if err != nil {
 		return
 	}
+	if resp.StatusCode != 200 {
+		return key, 0, fmt.Errorf("No key found")
+	}
+	found = 1
 	key = resp.Body
 	return
 }
