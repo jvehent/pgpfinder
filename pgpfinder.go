@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"code.google.com/p/go.crypto/openpgp"
 	"crypto/rsa"
 	"encoding/hex"
 	"flag"
@@ -13,32 +12,35 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"code.google.com/p/go.crypto/openpgp"
 )
 
 var verbose = false
 
 func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "%s - Find PGP keys on a keyserver - Julien Vehent 2014\n"+
+			"Usage: %s someuser@example.net someotheruser@example.com\n"+
+			"Options:\n", os.Args[0], os.Args[0])
+		flag.PrintDefaults()
+	}
 	var err error
 	var keys []io.ReadCloser
 	found := 0
+	var searches []string
 	var keyserver = flag.String("ks", "http://gpg.mozilla.org:80", "Key server. Default uses Mozilla's.")
 	var search = flag.String("search", "someuser@example.net", "Search string. May return multiple results.")
-	var id = flag.String("id", "0xA3D652173B763E8F", "Key ID to retrieve. Returns only one result.")
+	var id = flag.String("id", "0xABCDEF1234567890", "Key ID to retrieve. Returns only one result.")
 	var isverbose = flag.Bool("v", false, "Verbose mode")
 	flag.Parse()
 	if *isverbose {
 		verbose = true
 	}
-	if *search != "someuser@example.net" {
-		keys, found, err = SearchAndReturn(*search, *keyserver)
-		fmt.Println("found", found, "keys on", *keyserver, "for", *search)
-		if found < 1 {
-			os.Exit(1)
-		}
-		if err != nil {
-			panic(err)
-		}
-	} else {
+
+	// search by key ID
+	if *id != "0xABCDEF1234567890" {
+		fmt.Println("Searching for key id", *id)
 		key, found, err := GetKeyByID(*id, *keyserver)
 		if found == 0 {
 			fmt.Println("No key found")
@@ -52,8 +54,41 @@ func main() {
 			panic(err)
 		}
 		keys = append(keys, key)
+		err = printKeyInfo(keys)
+		if err != nil {
+			panic(err)
+		}
+		goto exit
 	}
 
+	// search by string
+	if *search != "someuser@example.net" {
+		searches = append(searches, *search)
+	} else {
+		args := flag.Args()
+		fmt.Println("Searching for the following keys:", args)
+		for _, arg := range args {
+			searches = append(searches, arg)
+		}
+	}
+	for _, s := range searches {
+		keys, found, err = SearchAndReturn(s, *keyserver)
+		fmt.Printf("\nFound %d keys on %s for %s\n", found, *keyserver, s)
+		if found < 1 {
+			os.Exit(1)
+		}
+		if err != nil {
+			panic(err)
+		}
+		err = printKeyInfo(keys)
+		if err != nil {
+			panic(err)
+		}
+	}
+exit:
+}
+
+func printKeyInfo(keys []io.ReadCloser) (err error) {
 	for _, key := range keys {
 		// Load PGP public key
 		els, err := openpgp.ReadArmoredKeyRing(key)
@@ -66,7 +101,7 @@ func main() {
 		}
 		for _, el := range els {
 			keyid := strconv.FormatUint(el.PrimaryKey.KeyId, 16)
-			fmt.Printf("\n========       Details of Key ID %s       ========\n", strings.ToUpper(keyid))
+			fmt.Printf("========       Details of Key ID %s       ========\n", strings.ToUpper(keyid))
 
 			fingerprint := hex.EncodeToString(el.PrimaryKey.Fingerprint[:])
 			fmt.Println("Fingerprint:", strings.ToUpper(fingerprint))
@@ -102,8 +137,9 @@ func main() {
 			}
 		}
 		key.Close()
-		fmt.Printf("\n================================================================\n")
+		fmt.Printf("================================================================\n")
 	}
+	return
 }
 
 func parseRSAPubKey(pubkey *rsa.PublicKey) (err error) {
